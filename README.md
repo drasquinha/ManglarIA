@@ -9,7 +9,6 @@ Supports multiple mangrove species
 Uses established allometric equations from peer-reviewed studies  
 Calculates aboveground biomass and carbon stocks  
 Aggregates species data to plot/site level  
-Generates comparison graphs  
 Simple and adaptable to different field datasets  
 
 ---
