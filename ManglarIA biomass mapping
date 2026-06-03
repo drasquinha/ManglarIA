@@ -1,0 +1,304 @@
+// Script for calculating biomass for mangroves in Mexico based on scientific literature
+//Author: Dina Rasquinha, World Wildlife Fund USA
+//Date created; 08/04/2026
+//Date updated: 06/03/2026
+
+//-----------------------------
+// 1. WOOD DENSITY LOOKUP
+// -----------------------------
+var wdLookup = ee.Dictionary({
+  'Avicennia germinans': 0.80,
+  'Rhizophora mangle': 0.90,
+  'Laguncularia racemosa': 0.75,
+  'Conocarpus erectus': 0.85
+});
+
+// -----------------------------
+// 2. LOAD TREE DATASET
+// -----------------------------
+// Assume you uploaded your CSV as an Earth Engine asset
+var treeMeasurements = ee.FeatureCollection(
+  'projects/ee-drasquinha/assets/ManglarIA/aboveground_rialagortos'
+);
+
+// -----------------------------
+// 3. BIOMASS FUNCTION (species-specific)
+// -----------------------------
+var computeAllBiomass = function(f) {
+  var species = ee.String(f.get('Species')).trim(); // remove extra spaces
+  var dbhRaw = f.get('DBH_cm');
+
+  // DBH may be missing; if so, set null
+  var dbh = ee.Algorithms.If(dbhRaw, ee.Number(dbhRaw), null);
+
+  // Lookup wood density (WD); if species missing, mark as 'NA'
+  var wd = ee.Algorithms.If(
+    wdLookup.contains(species),
+    wdLookup.get(species),
+    'NA'
+  );
+
+  // -----------------------------
+  // Helper: safely compute biomass only if DBH and WD are valid
+  // Returns 'NA' if DBH or WD is missing
+  // -----------------------------
+  var safeBiomass = function(eq) {
+    return ee.Algorithms.If(
+      ee.Algorithms.IsEqual(wd, 'NA'),
+      'NA',
+      ee.Algorithms.If(
+        ee.Algorithms.IsEqual(dbh, null),
+        'NA',
+        eq
+      )
+    );
+  };
+
+  // -----------------------------
+  // 3a. Avicennia germinans
+  // -----------------------------
+  // WD-based equation for DBH > 10 cm:
+  // B = 0.403 * WD * DBH^1.934
+  var B_Av_WDeq = ee.Algorithms.If(
+    species.equals('Avicennia germinans'),
+    safeBiomass(ee.Number(0.403).multiply(wd).multiply(ee.Number(dbh).pow(1.934))),
+    'NA'
+  );
+
+  // DBH-class equation (1–10 cm): log10 B = 2*log10(DBH) - 1
+  // DBH > 10 cm: same as WD-based above
+  var B_Av_DBHclass = ee.Algorithms.If(
+    species.equals('Avicennia germinans'),
+    safeBiomass(
+      ee.Algorithms.If(
+        ee.Number(dbh).lte(10),
+        ee.Number(10).pow(ee.Number(dbh).log10().multiply(2).subtract(1)), // DBH-class eq
+        ee.Number(0.403).multiply(wd).multiply(ee.Number(dbh).pow(1.934)) // WD eq
+      )
+    ),
+    'NA'
+  );
+
+  // -----------------------------
+  // 3b. Rhizophora mangle
+  // -----------------------------
+  // WD-based equation for DBH > 10 cm:
+  // B = 0.722 * WD * DBH^1.731
+  // DBH-class equation for 1–10 cm: log10 B = 2*log10(DBH) - 1
+  var B_Rh_DBHclass = ee.Algorithms.If(
+    species.equals('Rhizophora mangle'),
+    safeBiomass(
+      ee.Algorithms.If(
+        ee.Number(dbh).lte(10),
+        ee.Number(10).pow(ee.Number(dbh).log10().multiply(2).subtract(1)), // DBH-class eq
+        ee.Number(0.722).multiply(wd).multiply(ee.Number(dbh).pow(1.731)) // WD eq
+      )
+    ),
+    'NA'
+  );
+
+  // -----------------------------
+  // 3c. Laguncularia racemosa
+  // -----------------------------
+  // WD-based equation:
+  // B = 0.362 * WD * DBH^1.92
+  var B_La_WDeq = ee.Algorithms.If(
+    species.equals('Laguncularia racemosa'),
+    safeBiomass(ee.Number(0.362).multiply(wd).multiply(ee.Number(dbh).pow(1.92))),
+    'NA'
+  );
+
+  // DBH-class equation (all DBH):
+  // log10 B = 2*log10(DBH) - 1
+  var B_La_DBHclass = ee.Algorithms.If(
+    species.equals('Laguncularia racemosa'),
+    safeBiomass(ee.Number(10).pow(ee.Number(dbh).log10().multiply(2).subtract(1))),
+    'NA'
+  );
+
+  // -----------------------------
+  // 3d. Conocarpus erectus
+  // -----------------------------
+  // Only WD-based equation:
+  // B = 0.251 * WD * DBH^2.46
+  var B_Cono = ee.Algorithms.If(
+    species.equals('Conocarpus erectus'),
+    safeBiomass(ee.Number(0.251).multiply(wd).multiply(ee.Number(dbh).pow(2.46))),
+    'NA'
+  );
+
+  // -----------------------------
+  // 4. Combine biomass values for averaging
+  // Only numeric values are averaged for final biomass
+  // -----------------------------
+  var biomassList = ee.List([
+    B_Av_DBHclass, B_Av_WDeq,
+    B_Rh_DBHclass,
+    B_La_DBHclass, B_La_WDeq,
+    B_Cono
+  ]);
+
+  var numericBiomassList = biomassList.map(function(b) {
+    return ee.Algorithms.If(ee.Algorithms.IsEqual(b, 'NA'), 'NA', b);
+  }).filter(ee.Filter.neq('item', 'NA'));
+
+  var biomassAvg = ee.Algorithms.If(
+    numericBiomassList.size().gt(0),
+    numericBiomassList.reduce(ee.Reducer.mean()),
+    'NA'
+  );
+
+  // -----------------------------
+  // 5. Return feature with all biomass columns and final average
+  // -----------------------------
+  return f.set({
+    WD: wd,
+    B_Av_DBHclass: B_Av_DBHclass,
+    B_Av_WDeq: B_Av_WDeq,
+    B_Rh_DBHclass: B_Rh_DBHclass,
+    B_La_DBHclass: B_La_DBHclass,
+    B_La_WDeq: B_La_WDeq,
+    B_Cono: B_Cono,
+    biomass_final: biomassAvg
+  });
+};
+
+// -----------------------------
+// 6. APPLY BIOMASS FUNCTION TO DATASET
+// -----------------------------
+var result = treeMeasurements.map(computeAllBiomass);
+
+print('Biomass results', result);
+Map.centerObject(result, 10);
+
+
+
+/// -----------------------------
+// 1. Filter numeric biomass and compute biomass per hectare
+// -----------------------------
+var siteBiomass = result
+  .filter(ee.Filter.neq('biomass_final', 'NA'))
+  .map(function(f){
+    var plotArea = ee.Number(f.get('plot_area_ha'));
+    var biomassPerHa = ee.Number(f.get('biomass_final')).divide(plotArea);
+    return f.set('biomass_per_ha', biomassPerHa);
+  });
+
+// -----------------------------
+// 2. Group by ManglarIA_Project_Site_ID
+// -----------------------------
+var siteIDs = siteBiomass.aggregate_array('ManglarIA_Project_Site_ID').distinct();
+
+// Compute per-site statistics
+var siteStats = ee.FeatureCollection(siteIDs.map(function(siteID){
+  var siteTrees = siteBiomass.filter(
+    ee.Filter.eq('ManglarIA_Project_Site_ID', siteID)
+  );
+
+  // Average biomass per ha
+  var meanBiomassPerHa = siteTrees.aggregate_mean('biomass_per_ha');
+
+  // Average height (exclude nulls)
+  var meanHeight = treeMeasurements.aggregate_mean('Total_Height_m');
+
+  // Average DBH
+  var meanDBH = treeMeasurements.aggregate_mean('DBH_cm');
+
+  // Number of plots
+  var numPlots = treeMeasurements.aggregate_array('Plot_ID').distinct().length();
+
+  
+// Total individuals per site (Live + Dead, full dataset)
+var totalTrees = treeMeasurements
+  .filter(ee.Filter.eq('ManglarIA_Project_Site_ID', siteID))
+  .filter(
+    ee.Filter.or(
+      ee.Filter.eq('condition_live_or_dead', 'Live'),
+      ee.Filter.eq('condition_live_or_dead', 'dead')
+    )
+  )
+  .size();
+
+
+  // Species richness
+  var speciesRichness = siteTrees.aggregate_array('Species').distinct().length();
+
+  // Number of juveniles (dataset column is 'Juvenil')
+  var numJuveniles = treeMeasurements
+  .filter(ee.Filter.eq('ManglarIA_Project_Site_ID', siteID))
+  .filter(ee.Filter.eq('life_stage_juvenile_or_adult','Juvenil'))
+  .size();
+
+  // Number of adults
+  var numAdults = treeMeasurements
+  .filter(ee.Filter.eq('ManglarIA_Project_Site_ID', siteID))
+  .filter(ee.Filter.eq('life_stage_juvenile_or_adult','Adult'))
+  .size();
+
+  // Number of dead trees
+  var numDead = treeMeasurements
+  .filter(ee.Filter.eq('ManglarIA_Project_Site_ID', siteID))
+  .filter(ee.Filter.eq('condition_live_or_dead','dead')
+  ).size();
+
+  // Compute average coordinates for plotting
+  var avgLat = siteTrees.aggregate_mean('Latitude');
+  var avgLon = siteTrees.aggregate_mean('Longitude');
+  var geom = ee.Geometry.Point([avgLon, avgLat]);
+
+  return ee.Feature(geom, {
+    Site_ID: siteID,
+    biomass_per_ha: meanBiomassPerHa,
+    avg_height_m: meanHeight,
+    avg_dbh_cm: meanDBH,
+    num_plots: numPlots,
+    total_trees: totalTrees,
+    species_richness: speciesRichness,
+    num_juveniles: numJuveniles,
+    num_adults: numAdults,
+    num_dead: numDead
+  });
+}));
+
+// -----------------------------
+// 3. Print detailed site statistics
+// -----------------------------
+siteStats.evaluate(function(ftList){
+  ftList.features.forEach(function(f){
+    var props = f.properties;
+    print('Site:', props.Site_ID,
+          '| Biomass (Mg/ha):', props.biomass_per_ha ? props.biomass_per_ha.toFixed(2) : 'NA',
+          '| Avg Height (m):', props.avg_height_m ? props.avg_height_m.toFixed(2) : 'NA',
+          '| Avg DBH (cm):', props.avg_dbh_cm ? props.avg_dbh_cm.toFixed(2) : 'NA',
+          '| Number of plots:', props.num_plots,
+          '| Total trees:', props.total_trees,
+          '| Species richness:', props.species_richness,
+          '| Juveniles:', props.num_juveniles,
+          '| Adults:', props.num_adults,
+          '| Dead trees:', props.num_dead
+    );
+  });
+});
+
+// -----------------------------
+// 4. Keep the original bar chart by site
+// -----------------------------
+var chart = ui.Chart.feature.byFeature(siteStats, 'Site_ID', 'biomass_per_ha')
+  .setChartType('ColumnChart')
+  .setOptions({
+    title: 'Mean Biomass Density by ManglarIA Project Site',
+    hAxis: {title: 'Site ID', slantedText: true, slantedTextAngle: 45},
+    vAxis: {title: 'Mean Biomass (Mg/ha)'},
+    legend: {position: 'none'},
+    colors: ['forestgreen']
+  });
+
+print(chart);
+
+print('Unique life stages:', treeMeasurements.aggregate_array('life_stage_juvenile_or_adult').distinct());
+
+// -----------------------------
+// 5. Center map on dataset
+// -----------------------------
+Map.centerObject(siteStats, 10);
+Map.addLayer(siteStats, {color:'blue'}, 'Sites');
